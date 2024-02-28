@@ -773,6 +773,8 @@ if __name__ == "__main__":
 
     print('prepping dataset...')
     # and for preparing datasets
+    # TODO can save time by not copying reg and using 1_man and 1_woman folder directly
+    # TODO
     updated_args = dreambooth_folder_preparation(
         args.remote_training_data_dir,
         args.remote_training_repeats,
@@ -786,9 +788,9 @@ if __name__ == "__main__":
     #- "update trin_data_dir" AND "reg_data_dir" AND "output_dir"
     d = json.load(open(args.config_file))
     for k,v in updated_args.items():
-        if k in d and k in ['reg_data_dir', 'train_data_dir']: 
+        if k in d:
             # folder containing img and reg dir
-            d[k] = os.path.dirname(v)
+            d[k] = os.path.dirname(v) if k in ['reg_data_dir', 'train_data_dir'] else v
 
     # remove train config args
     d.pop('train_config', None)

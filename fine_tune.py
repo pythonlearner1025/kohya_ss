@@ -526,7 +526,6 @@ if __name__ == "__main__":
     # config path for caption_images
     # config path for 
     parser = setup_parser()
-    parser.add_argument('--config_file')
     parser.add_argument('--remote_training_data_dir')
     parser.add_argument('--remote_instance_keyword')
     parser.add_argument('--remote_training_repeats')

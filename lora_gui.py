@@ -12,9 +12,9 @@ from library.common_gui import (
     color_aug_changed,
     run_cmd_advanced_training,
     update_my_data,
-    check_if_model_exist,
+    #check_if_model_exist,
     output_message,
-    verify_image_folder_pattern,
+    #verify_image_folder_pattern,
     SaveConfigFile,
     save_to_file,
     check_duplicate_filenames,
@@ -420,7 +420,6 @@ def open_configuration(
         values.append(gr.Row(visible=False))
 
     return tuple(values)
-
 
 def train_model(
     headless,
@@ -1044,7 +1043,6 @@ def train_model(
         #     save_inference_file(
         #         output_dir, v2, v_parameterization, output_name
         #     )
-
 
 def lora_tab(
     train_data_dir_input=gr.Textbox(),

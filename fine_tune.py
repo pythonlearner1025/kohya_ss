@@ -757,6 +757,7 @@ if __name__ == "__main__":
     postfix = ''
     
     print('captioning...')
+    # first we need remote_training_img dir for captioning
     caption_images(
         args.remote_training_data_dir,
         caption_file_ext,
@@ -771,6 +772,7 @@ if __name__ == "__main__":
     )
 
     print('prepping dataset...')
+    # and for preparing datasets
     updated_args = dreambooth_folder_preparation(
         args.remote_training_data_dir,
         args.remote_training_repeats,
@@ -784,8 +786,10 @@ if __name__ == "__main__":
     #- "update trin_data_dir" AND "reg_data_dir" AND "output_dir"
     d = json.load(open(args.config_file))
     for k,v in updated_args.items():
-        if k in d: 
-            d[k] = v
+        if k in d and k in ['reg_data_dir', 'train_data_dir']: 
+            # folder containing img and reg dir
+            d[k] = os.path.dirname(v)
+
     # remove train config args
     d.pop('train_config', None)
     with open(args.config_file, 'w') as f:

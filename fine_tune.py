@@ -799,7 +799,7 @@ if __name__ == "__main__":
     filtered_args = {k:my_data[k] for k in train_model_args if k in my_data}
 
     headless = {'label': 'True'}
-    print_only = {'label': 'True'}
+    print_only = {'label': 'False'}
  
     train_model(headless, print_only, **filtered_args)
     # sample cmd:

@@ -526,7 +526,7 @@ if __name__ == "__main__":
     # config path for caption_images
     # config path for 
     parser = setup_parser()
-    parser.add_argument('--remote_config_path')
+    parser.add_argument('--config_file')
     parser.add_argument('--remote_training_data_dir')
     parser.add_argument('--remote_instance_keyword')
     parser.add_argument('--remote_training_repeats')
@@ -534,7 +534,7 @@ if __name__ == "__main__":
     parser.add_argument('--remote_output_dir')
     args = parser.parse_args()
 
-    config_path = args.remote_config_path
+    config_path = args.config_file
     configs = json.load(open(config_path))
 
     # TODO get female reg
@@ -578,12 +578,12 @@ if __name__ == "__main__":
     )
 
     #- "update trin_data_dir" AND "reg_data_dir" AND "output_dir"
-    d = json.load(open(args.remote_config_path))
+    d = json.load(open(args.config_file))
     for k,v in updated_args.items():
         if k in d: d[k] = v
     # remove train config args
     d.pop('train_config', None)
-    with open(args.remote_config_path, 'w') as f:
+    with open(args.config_file, 'w') as f:
         json.dump(d,f)
 
     args = train_util.read_config_from_file(args, parser)

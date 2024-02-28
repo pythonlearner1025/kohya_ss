@@ -2,469 +2,707 @@
 # XXX dropped option: hypernetwork training
 
 import argparse
-import gc
 import math
 import os
-from multiprocessing import Value
-import toml
-
-from tqdm import tqdm
-import torch
 
 from library.ipex_interop import init_ipex
 
 init_ipex()
 
-from accelerate.utils import set_seed
-from diffusers import DDPMScheduler
-
 import library.train_util as train_util
 import library.config_util as config_util
-from library.config_util import (
-    ConfigSanitizer,
-    BlueprintGenerator,
-)
 import library.custom_train_functions as custom_train_functions
-from library.custom_train_functions import (
-    apply_snr_weight,
-    get_weighted_text_embeddings,
-    prepare_scheduler_for_custom_training,
-    scale_v_prediction_loss_like_noise_prediction,
-    apply_debiased_estimation,
-)
 
 from library.blip_caption_gui import caption_images
 from library.dreambooth_folder_creation_gui import dreambooth_folder_preparation
+from library.custom_logging import setup_logging
+import inspect
 
-def train(args):
-    train_util.verify_training_args(args)
-    train_util.prepare_dataset_args(args, True)
+from library.common_gui import (
+    run_cmd_advanced_training,
+    check_if_model_exist,
+    verify_image_folder_pattern
+)
+from library.class_sample_images import run_cmd_sample
+from library.class_command_executor import CommandExecutor
+executor = CommandExecutor()
 
-    cache_latents = args.cache_latents
+log = setup_logging()
 
-    if args.seed is not None:
-        set_seed(args.seed)  # 乱数系列を初期化する
+V2_BASE_MODELS = [
+    "stabilityai/stable-diffusion-2-1-base/blob/main/v2-1_512-ema-pruned",
+    "stabilityai/stable-diffusion-2-1-base",
+    "stabilityai/stable-diffusion-2-base",
+]
 
-    tokenizer = train_util.load_tokenizer(args)
+# define a list of substrings to search for v_parameterization models
+V_PARAMETERIZATION_MODELS = [
+    "stabilityai/stable-diffusion-2-1/blob/main/v2-1_768-ema-pruned",
+    "stabilityai/stable-diffusion-2-1",
+    "stabilityai/stable-diffusion-2",
+]
 
-    # データセットを準備する
-    if args.dataset_class is None:
-        blueprint_generator = BlueprintGenerator(ConfigSanitizer(False, True, False, True))
-        if args.dataset_config is not None:
-            print(f"Load dataset config from {args.dataset_config}")
-            user_config = config_util.load_user_config(args.dataset_config)
-            ignored = ["train_data_dir", "in_json"]
-            if any(getattr(args, attr) is not None for attr in ignored):
-                print(
-                    "ignore following options because config file is found: {0} / 設定ファイルが利用されるため以下のオプションは無視されます: {0}".format(
-                        ", ".join(ignored)
+# define a list of substrings to v1.x models
+V1_MODELS = [
+    "CompVis/stable-diffusion-v1-4",
+    "runwayml/stable-diffusion-v1-5",
+]
+
+# define a list of substrings to search for SDXL base models
+SDXL_MODELS = [
+    "stabilityai/stable-diffusion-xl-base-1.0",
+    "stabilityai/stable-diffusion-xl-refiner-1.0",
+]
+
+ALL_PRESET_MODELS = V2_BASE_MODELS + V_PARAMETERIZATION_MODELS + V1_MODELS + SDXL_MODELS
+
+def train_model(
+    headless,
+    print_only,
+    pretrained_model_name_or_path,
+    v2,
+    v_parameterization,
+    sdxl,
+    logging_dir,
+    train_data_dir,
+    reg_data_dir,
+    output_dir,
+    max_resolution,
+    learning_rate,
+    lr_scheduler,
+    lr_warmup,
+    train_batch_size,
+    epoch,
+    save_every_n_epochs,
+    mixed_precision,
+    save_precision,
+    seed,
+    num_cpu_threads_per_process,
+    cache_latents,
+    cache_latents_to_disk,
+    caption_extension,
+    enable_bucket,
+    gradient_checkpointing,
+    fp8_base,
+    full_fp16,
+    # no_token_padding,
+    stop_text_encoder_training_pct,
+    min_bucket_reso,
+    max_bucket_reso,
+    # use_8bit_adam,
+    xformers,
+    save_model_as,
+    shuffle_caption,
+    save_state,
+    resume,
+    prior_loss_weight,
+    text_encoder_lr,
+    unet_lr,
+    network_dim,
+    lora_network_weights,
+    dim_from_weights,
+    color_aug,
+    flip_aug,
+    clip_skip,
+    num_processes,
+    num_machines,
+    multi_gpu,
+    gpu_ids,
+    gradient_accumulation_steps,
+    mem_eff_attn,
+    output_name,
+    model_list,  # Keep this. Yes, it is unused here but required given the common list used
+    max_token_length,
+    max_train_epochs,
+    max_train_steps,
+    max_data_loader_n_workers,
+    network_alpha,
+    training_comment,
+    keep_tokens,
+    lr_scheduler_num_cycles,
+    lr_scheduler_power,
+    persistent_data_loader_workers,
+    bucket_no_upscale,
+    random_crop,
+    bucket_reso_steps,
+    v_pred_like_loss,
+    caption_dropout_every_n_epochs,
+    caption_dropout_rate,
+    optimizer,
+    optimizer_args,
+    lr_scheduler_args,
+    max_grad_norm,
+    noise_offset_type,
+    noise_offset,
+    adaptive_noise_scale,
+    multires_noise_iterations,
+    multires_noise_discount,
+    LoRA_type,
+    factor,
+    use_cp,
+    use_tucker,
+    use_scalar,
+    rank_dropout_scale,
+    constrain,
+    rescaled,
+    train_norm,
+    decompose_both,
+    train_on_input,
+    conv_dim,
+    conv_alpha,
+    sample_every_n_steps,
+    sample_every_n_epochs,
+    sample_sampler,
+    sample_prompts,
+    additional_parameters,
+    vae_batch_size,
+    min_snr_gamma,
+    down_lr_weight,
+    mid_lr_weight,
+    up_lr_weight,
+    block_lr_zero_threshold,
+    block_dims,
+    block_alphas,
+    conv_block_dims,
+    conv_block_alphas,
+    weighted_captions,
+    unit,
+    save_every_n_steps,
+    save_last_n_steps,
+    save_last_n_steps_state,
+    use_wandb,
+    wandb_api_key,
+    scale_v_pred_loss_like_noise_pred,
+    scale_weight_norms,
+    network_dropout,
+    rank_dropout,
+    module_dropout,
+    sdxl_cache_text_encoder_outputs,
+    sdxl_no_half_vae,
+    full_bf16,
+    min_timestep,
+    max_timestep,
+    vae,
+    LyCORIS_preset,
+    debiased_estimation_loss,
+):
+    # Get list of function parameters and values
+    parameters = list(locals().items())
+    global command_running
+
+    print_only_bool = True if print_only.get("label") == "True" else False
+    log.info(f"Start training LoRA {LoRA_type} ...")
+    headless_bool = True if headless.get("label") == "True" else False
+
+    if pretrained_model_name_or_path == "":
+        msg="Source model information is missing"
+        print(msg)
+        return
+
+    if train_data_dir == "":
+        msg="Image folder path is missing"
+        print(msg)
+        return
+
+    # Check if there are files with the same filename but different image extension... warn the user if it is the case.
+
+    if not os.path.exists(train_data_dir):
+        print('Image Folder does not exist')
+        print(train_data_dir)
+        return
+
+    if not verify_image_folder_pattern(train_data_dir):
+        return
+
+    if reg_data_dir != "":
+        if not os.path.exists(reg_data_dir):
+            print('REg folder does not exist')
+            print(reg_data_dir)
+            return
+
+        if not verify_image_folder_pattern(reg_data_dir):
+            return
+
+    if output_dir == "":
+        print('output folder path is missing')
+        return
+
+    if int(bucket_reso_steps) < 1:
+        msg="Bucket resolution steps need to be greater than 0",
+        print(msg)
+        return
+
+    if noise_offset == "":
+        noise_offset = 0
+
+    if float(noise_offset) > 1 or float(noise_offset) < 0:
+        msg="Noise offset need to be a value between 0 and 1"
+        print(msg)
+        return
+
+    # if float(noise_offset) > 0 and (
+    #     multires_noise_iterations > 0 or multires_noise_discount > 0
+    # ):
+    #     output_message(
+    #         msg="noise offset and multires_noise can't be set at the same time. Only use one or the other.",
+    #         title='Error',
+    #         headless=headless_bool,
+    #     )
+    #     return
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    if stop_text_encoder_training_pct > 0:
+        msg='Output "stop text encoder training" is not yet supported. Ignoring',
+        print(msg)
+        stop_text_encoder_training_pct = 0
+
+    if check_if_model_exist(
+        output_name, output_dir, save_model_as, headless=headless_bool
+    ):
+        return
+
+    # if optimizer == 'Adafactor' and lr_warmup != '0':
+    #     output_message(
+    #         msg="Warning: lr_scheduler is set to 'Adafactor', so 'LR warmup (% of steps)' will be considered 0.",
+    #         title='Warning',
+    #         headless=headless_bool,
+    #     )
+    #     lr_warmup = '0'
+
+    # If string is empty set string to 0.
+    if text_encoder_lr == "":
+        text_encoder_lr = 0
+    if unet_lr == "":
+        unet_lr = 0
+
+    # Get a list of all subfolders in train_data_dir
+    subfolders = [
+        f
+        for f in os.listdir(train_data_dir)
+        if os.path.isdir(os.path.join(train_data_dir, f))
+    ]
+
+    total_steps = 0
+
+    # Loop through each subfolder and extract the number of repeats
+    for folder in subfolders:
+        try:
+            # Extract the number of repeats from the folder name
+            repeats = int(folder.split("_")[0])
+
+            # Count the number of images in the folder
+            num_images = len(
+                [
+                    f
+                    for f, lower_f in (
+                        (file, file.lower())
+                        for file in os.listdir(os.path.join(train_data_dir, folder))
                     )
-                )
-        else:
-            user_config = {
-                "datasets": [
-                    {
-                        "subsets": [
-                            {
-                                "image_dir": args.train_data_dir,
-                                "metadata_file": args.in_json,
-                            }
-                        ]
-                    }
+                    if lower_f.endswith((".jpg", ".jpeg", ".png", ".webp"))
                 ]
-            }
+            )
 
-        blueprint = blueprint_generator.generate(user_config, args, tokenizer=tokenizer)
-        train_dataset_group = config_util.generate_dataset_group_by_blueprint(blueprint.dataset_group)
+            log.info(f"Folder {folder}: {num_images} images found")
+
+            # Calculate the total number of steps for this folder
+            steps = repeats * num_images
+
+            # log.info the result
+            log.info(f"Folder {folder}: {steps} steps")
+
+            total_steps += steps
+
+        except ValueError:
+            # Handle the case where the folder name does not contain an underscore
+            log.info(f"Error: '{folder}' does not contain an underscore, skipping...")
+
+    if reg_data_dir == "":
+        reg_factor = 1
     else:
-        train_dataset_group = train_util.load_arbitrary_dataset(args, tokenizer)
-
-    current_epoch = Value("i", 0)
-    current_step = Value("i", 0)
-    ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
-    collator = train_util.collator_class(current_epoch, current_step, ds_for_collator)
-
-    if args.debug_dataset:
-        train_util.debug_dataset(train_dataset_group)
-        return
-    if len(train_dataset_group) == 0:
-        print(
-            "No data found. Please verify the metadata file and train_data_dir option. / 画像がありません。メタデータおよびtrain_data_dirオプションを確認してください。"
+        log.warning(
+            "Regularisation images are used... Will double the number of steps required..."
         )
-        return
+        reg_factor = 2
 
-    if cache_latents:
-        assert (
-            train_dataset_group.is_latent_cacheable()
-        ), "when caching latents, either color_aug or random_crop cannot be used / latentをキャッシュするときはcolor_augとrandom_cropは使えません"
+    log.info(f"Total steps: {total_steps}")
+    log.info(f"Train batch size: {train_batch_size}")
+    log.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
+    log.info(f"Epoch: {epoch}")
+    log.info(f"Regulatization factor: {reg_factor}")
 
-    # acceleratorを準備する
-    print("prepare accelerator")
-    accelerator = train_util.prepare_accelerator(args)
+    if max_train_steps == "" or max_train_steps == "0":
+        # calculate max_train_steps
+        max_train_steps = int(
+            math.ceil(
+                float(total_steps)
+                / int(train_batch_size)
+                / int(gradient_accumulation_steps)
+                * int(epoch)
+                * int(reg_factor)
+            )
+        )
+        log.info(
+            f"max_train_steps ({total_steps} / {train_batch_size} / {gradient_accumulation_steps} * {epoch} * {reg_factor}) = {max_train_steps}"
+        )
 
-    # mixed precisionに対応した型を用意しておき適宜castする
-    weight_dtype, save_dtype = train_util.prepare_dtype(args)
-
-    # モデルを読み込む
-    text_encoder, vae, unet, load_stable_diffusion_format = train_util.load_target_model(args, weight_dtype, accelerator)
-
-    #memore verify load/save model formats
-    if load_stable_diffusion_format:
-        src_stable_diffusion_ckpt = args.pretrained_model_name_or_path
-        src_diffusers_model_path = None
+    # calculate stop encoder training
+    if stop_text_encoder_training_pct == None:
+        stop_text_encoder_training = 0
     else:
-        src_stable_diffusion_ckpt = None
-        src_diffusers_model_path = args.pretrained_model_name_or_path
+        stop_text_encoder_training = math.ceil(
+            float(max_train_steps) / 100 * int(stop_text_encoder_training_pct)
+        )
+    log.info(f"stop_text_encoder_training = {stop_text_encoder_training}")
 
-    if args.save_model_as is None:
-        save_stable_diffusion_format = load_stable_diffusion_format
-        use_safetensors = args.use_safetensors
+    lr_warmup_steps = round(float(int(lr_warmup) * int(max_train_steps) / 100))
+    log.info(f"lr_warmup_steps = {lr_warmup_steps}")
+
+    run_cmd = "accelerate launch"
+
+    run_cmd += run_cmd_advanced_training(
+        num_processes=num_processes,
+        num_machines=num_machines,
+        multi_gpu=multi_gpu,
+        gpu_ids=gpu_ids,
+        num_cpu_threads_per_process=num_cpu_threads_per_process,
+    )
+
+    if sdxl:
+        run_cmd += f' "./sdxl_train_network.py"'
     else:
-        save_stable_diffusion_format = args.save_model_as.lower() == "ckpt" or args.save_model_as.lower() == "safetensors"
-        use_safetensors = args.use_safetensors or ("safetensors" in args.save_model_as.lower())
+        run_cmd += f' "./train_network.py"'
 
-    # Diffusers版のxformers使用フラグを設定する関数
-    def set_diffusers_xformers_flag(model, valid):
-        #   model.set_use_memory_efficient_attention_xformers(valid)            # 次のリリースでなくなりそう
-        # pipeが自動で再帰的にset_use_memory_efficient_attention_xformersを探すんだって(;´Д｀)
-        # U-Netだけ使う時にはどうすればいいのか……仕方ないからコピって使うか
-        # 0.10.2でなんか巻き戻って個別に指定するようになった(;^ω^)
+    if LoRA_type == "LyCORIS/Diag-OFT":
+        network_module = "lycoris.kohya"
+        network_args = f' "preset={LyCORIS_preset}" "conv_dim={conv_dim}" "conv_alpha={conv_alpha}" "module_dropout={module_dropout}" "use_tucker={use_tucker}" "use_scalar={use_scalar}" "rank_dropout_scale={rank_dropout_scale}" "constrain={constrain}" "rescaled={rescaled}" "algo=diag-oft" '
 
-        # Recursively walk through all the children.
-        # Any children which exposes the set_use_memory_efficient_attention_xformers method
-        # gets the message
-        def fn_recursive_set_mem_eff(module: torch.nn.Module):
-            if hasattr(module, "set_use_memory_efficient_attention_xformers"):
-                module.set_use_memory_efficient_attention_xformers(valid)
+    if LoRA_type == "LyCORIS/DyLoRA":
+        network_module = "lycoris.kohya"
+        network_args = f' "preset={LyCORIS_preset}" "conv_dim={conv_dim}" "conv_alpha={conv_alpha}" "use_tucker={use_tucker}" "block_size={unit}" "rank_dropout={rank_dropout}" "module_dropout={module_dropout}" "algo=dylora" "train_norm={train_norm}"'
 
-            for child in module.children():
-                fn_recursive_set_mem_eff(child)
+    if LoRA_type == "LyCORIS/GLoRA":
+        network_module = "lycoris.kohya"
+        network_args = f' "preset={LyCORIS_preset}" "conv_dim={conv_dim}" "conv_alpha={conv_alpha}" "rank_dropout={rank_dropout}" "module_dropout={module_dropout}" "rank_dropout_scale={rank_dropout_scale}" "algo=glora" "train_norm={train_norm}"'
 
-        fn_recursive_set_mem_eff(model)
+    if LoRA_type == "LyCORIS/iA3":
+        network_module = "lycoris.kohya"
+        network_args = f' "preset={LyCORIS_preset}" "conv_dim={conv_dim}" "conv_alpha={conv_alpha}" "train_on_input={train_on_input}" "algo=ia3"'
 
-    # モデルに xformers とか memory efficient attention を組み込む
-    if args.diffusers_xformers:
-        accelerator.print("Use xformers by Diffusers")
-        set_diffusers_xformers_flag(unet, True)
-    else:
-        # Windows版のxformersはfloatで学習できないのでxformersを使わない設定も可能にしておく必要がある
-        accelerator.print("Disable Diffusers' xformers")
-        set_diffusers_xformers_flag(unet, False)
-        train_util.replace_unet_modules(unet, args.mem_eff_attn, args.xformers, args.sdpa)
+    if LoRA_type == "LoCon" or LoRA_type == "LyCORIS/LoCon":
+        network_module = "lycoris.kohya"
+        network_args = f' "preset={LyCORIS_preset}" "conv_dim={conv_dim}" "conv_alpha={conv_alpha}" "rank_dropout={rank_dropout}" "module_dropout={module_dropout}" "use_tucker={use_tucker}" "use_scalar={use_scalar}" "rank_dropout_scale={rank_dropout_scale}" "algo=locon" "train_norm={train_norm}"'
 
-    # 学習を準備する
-    if cache_latents:
-        vae.to(accelerator.device, dtype=weight_dtype)
-        vae.requires_grad_(False)
-        vae.eval()
-        with torch.no_grad():
-            train_dataset_group.cache_latents(vae, args.vae_batch_size, args.cache_latents_to_disk, accelerator.is_main_process)
-        vae.to("cpu")
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
+    if LoRA_type == "LyCORIS/LoHa":
+        network_module = "lycoris.kohya"
+        network_args = f' "preset={LyCORIS_preset}" "conv_dim={conv_dim}" "conv_alpha={conv_alpha}" "rank_dropout={rank_dropout}" "module_dropout={module_dropout}" "use_tucker={use_tucker}" "use_scalar={use_scalar}" "rank_dropout_scale={rank_dropout_scale}" "algo=loha" "train_norm={train_norm}"'
 
-        accelerator.wait_for_everyone()
+    if LoRA_type == "LyCORIS/LoKr":
+        network_module = "lycoris.kohya"
+        network_args = f' "preset={LyCORIS_preset}" "conv_dim={conv_dim}" "conv_alpha={conv_alpha}" "rank_dropout={rank_dropout}" "module_dropout={module_dropout}" "factor={factor}" "use_cp={use_cp}" "use_scalar={use_scalar}" "decompose_both={decompose_both}" "rank_dropout_scale={rank_dropout_scale}" "algo=lokr" "train_norm={train_norm}"'
 
-    # 学習を準備する：モデルを適切な状態にする
-    training_models = []
-    if args.gradient_checkpointing:
-        unet.enable_gradient_checkpointing()
-    training_models.append(unet)
+    if LoRA_type == "LyCORIS/Native Fine-Tuning":
+        network_module = "lycoris.kohya"
+        network_args = f' "preset={LyCORIS_preset}" "rank_dropout={rank_dropout}" "module_dropout={module_dropout}" "use_tucker={use_tucker}" "use_scalar={use_scalar}" "rank_dropout_scale={rank_dropout_scale}" "algo=full" "train_norm={train_norm}"'
 
-    if args.train_text_encoder:
-        accelerator.print("enable text encoder training")
-        if args.gradient_checkpointing:
-            text_encoder.gradient_checkpointing_enable()
-        training_models.append(text_encoder)
-    else:
-        text_encoder.to(accelerator.device, dtype=weight_dtype)
-        text_encoder.requires_grad_(False)  # text encoderは学習しない
-        if args.gradient_checkpointing:
-            text_encoder.gradient_checkpointing_enable()
-            text_encoder.train()  # required for gradient_checkpointing
-        else:
-            text_encoder.eval()
-
-    if not cache_latents:
-        vae.requires_grad_(False)
-        vae.eval()
-        vae.to(accelerator.device, dtype=weight_dtype)
-
-    for m in training_models:
-        m.requires_grad_(True)
-
-    trainable_params = []
-    if args.learning_rate_te is None or not args.train_text_encoder:
-        for m in training_models:
-            trainable_params.extend(m.parameters())
-    else:
-        trainable_params = [
-            {"params": list(unet.parameters()), "lr": args.learning_rate},
-            {"params": list(text_encoder.parameters()), "lr": args.learning_rate_te},
+    if LoRA_type in ["Kohya LoCon", "Standard"]:
+        kohya_lora_var_list = [
+            "down_lr_weight",
+            "mid_lr_weight",
+            "up_lr_weight",
+            "block_lr_zero_threshold",
+            "block_dims",
+            "block_alphas",
+            "conv_block_dims",
+            "conv_block_alphas",
+            "rank_dropout",
+            "module_dropout",
         ]
 
-    # 学習に必要なクラスを準備する
-    accelerator.print("prepare optimizer, data loader etc.")
-    _, _, optimizer = train_util.get_optimizer(args, trainable_params=trainable_params)
+        network_module = "networks.lora"
+        kohya_lora_vars = {
+            key: value
+            for key, value in vars().items()
+            if key in kohya_lora_var_list and value
+        }
 
-    # dataloaderを準備する
-    # DataLoaderのプロセス数：0はメインプロセスになる
-    n_workers = min(args.max_data_loader_n_workers, os.cpu_count() - 1)  # cpu_count-1 ただし最大で指定された数まで
-    train_dataloader = torch.utils.data.DataLoader(
-        train_dataset_group,
-        batch_size=1,
-        shuffle=True,
-        collate_fn=collator,
-        num_workers=n_workers,
-        persistent_workers=args.persistent_data_loader_workers,
+        network_args = ""
+        if LoRA_type == "Kohya LoCon":
+            network_args += f' conv_dim="{conv_dim}" conv_alpha="{conv_alpha}"'
+
+        for key, value in kohya_lora_vars.items():
+            if value:
+                network_args += f' {key}="{value}"'
+
+    if LoRA_type in [
+        "LoRA-FA",
+    ]:
+        kohya_lora_var_list = [
+            "down_lr_weight",
+            "mid_lr_weight",
+            "up_lr_weight",
+            "block_lr_zero_threshold",
+            "block_dims",
+            "block_alphas",
+            "conv_block_dims",
+            "conv_block_alphas",
+            "rank_dropout",
+            "module_dropout",
+        ]
+
+        network_module = "networks.lora_fa"
+        kohya_lora_vars = {
+            key: value
+            for key, value in vars().items()
+            if key in kohya_lora_var_list and value
+        }
+
+        network_args = ""
+        if LoRA_type == "Kohya LoCon":
+            network_args += f' conv_dim="{conv_dim}" conv_alpha="{conv_alpha}"'
+
+        for key, value in kohya_lora_vars.items():
+            if value:
+                network_args += f' {key}="{value}"'
+
+    if LoRA_type in ["Kohya DyLoRA"]:
+        kohya_lora_var_list = [
+            "conv_dim",
+            "conv_alpha",
+            "down_lr_weight",
+            "mid_lr_weight",
+            "up_lr_weight",
+            "block_lr_zero_threshold",
+            "block_dims",
+            "block_alphas",
+            "conv_block_dims",
+            "conv_block_alphas",
+            "rank_dropout",
+            "module_dropout",
+            "unit",
+        ]
+
+        network_module = "networks.dylora"
+        kohya_lora_vars = {
+            key: value
+            for key, value in vars().items()
+            if key in kohya_lora_var_list and value
+        }
+
+        network_args = ""
+
+        for key, value in kohya_lora_vars.items():
+            if value:
+                network_args += f' {key}="{value}"'
+
+    network_train_text_encoder_only = False
+    network_train_unet_only = False
+
+    # Convert learning rates to float once and store the result for re-use
+    if text_encoder_lr is None:
+        msg="Please input valid Text Encoder learning rate (between 0 and 1)"
+        print(msg)
+        return
+    if unet_lr is None:
+        msg="Please input valid Unet learning rate (between 0 and 1)"
+        print(msg)
+        return
+    text_encoder_lr_float = float(text_encoder_lr)
+    unet_lr_float = float(unet_lr)
+    
+    
+
+    # Determine the training configuration based on learning rate values
+    if text_encoder_lr_float == 0 and unet_lr_float == 0:
+        if float(learning_rate) == 0:
+            msg="Please input learning rate values."
+            print(msg)
+            return
+    elif text_encoder_lr_float != 0 and unet_lr_float == 0:
+        network_train_text_encoder_only = True
+    elif text_encoder_lr_float == 0 and unet_lr_float != 0:
+        network_train_unet_only = True
+    # If both learning rates are non-zero, no specific flags need to be set
+
+    run_cmd += run_cmd_advanced_training(
+        adaptive_noise_scale=adaptive_noise_scale,
+        additional_parameters=additional_parameters,
+        bucket_no_upscale=bucket_no_upscale,
+        bucket_reso_steps=bucket_reso_steps,
+        cache_latents=cache_latents,
+        cache_latents_to_disk=cache_latents_to_disk,
+        cache_text_encoder_outputs=True if sdxl and sdxl_cache_text_encoder_outputs else None,
+        caption_dropout_every_n_epochs=caption_dropout_every_n_epochs,
+        caption_dropout_rate=caption_dropout_rate,
+        caption_extension=caption_extension,
+        clip_skip=clip_skip,
+        color_aug=color_aug,
+        debiased_estimation_loss=debiased_estimation_loss,
+        dim_from_weights=dim_from_weights,
+        enable_bucket=enable_bucket,
+        epoch=epoch,
+        flip_aug=flip_aug,
+        fp8_base=fp8_base,
+        full_bf16=full_bf16,
+        full_fp16=full_fp16,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        gradient_checkpointing=gradient_checkpointing,
+        keep_tokens=keep_tokens,
+        learning_rate=learning_rate,
+        logging_dir=logging_dir,
+        lora_network_weights=lora_network_weights,
+        lr_scheduler=lr_scheduler,
+        lr_scheduler_args=lr_scheduler_args,
+        lr_scheduler_num_cycles=lr_scheduler_num_cycles,
+        lr_scheduler_power=lr_scheduler_power,
+        lr_warmup_steps=lr_warmup_steps,
+        max_bucket_reso=max_bucket_reso,
+        max_data_loader_n_workers=max_data_loader_n_workers,
+        max_grad_norm=max_grad_norm,
+        max_resolution=max_resolution,
+        max_timestep=max_timestep,
+        max_token_length=max_token_length,
+        max_train_epochs=max_train_epochs,
+        max_train_steps=max_train_steps,
+        mem_eff_attn=mem_eff_attn,
+        min_bucket_reso=min_bucket_reso,
+        min_snr_gamma=min_snr_gamma,
+        min_timestep=min_timestep,
+        mixed_precision=mixed_precision,
+        multires_noise_discount=multires_noise_discount,
+        multires_noise_iterations=multires_noise_iterations,
+        network_alpha=network_alpha,
+        network_args=network_args,
+        network_dim=network_dim,
+        network_dropout=network_dropout,
+        network_module=network_module,
+        network_train_unet_only=network_train_unet_only,
+        network_train_text_encoder_only=network_train_text_encoder_only,
+        no_half_vae=True if sdxl and sdxl_no_half_vae else None,
+        # no_token_padding=no_token_padding,
+        noise_offset=noise_offset,
+        noise_offset_type=noise_offset_type,
+        optimizer=optimizer,
+        optimizer_args=optimizer_args,
+        output_dir=output_dir,
+        output_name=output_name,
+        persistent_data_loader_workers=persistent_data_loader_workers,
+        pretrained_model_name_or_path=pretrained_model_name_or_path,
+        prior_loss_weight=prior_loss_weight,
+        random_crop=random_crop,
+        reg_data_dir=reg_data_dir,
+        resume=resume,
+        save_every_n_epochs=save_every_n_epochs,
+        save_every_n_steps=save_every_n_steps,
+        save_last_n_steps=save_last_n_steps,
+        save_last_n_steps_state=save_last_n_steps_state,
+        save_model_as=save_model_as,
+        save_precision=save_precision,
+        save_state=save_state,
+        scale_v_pred_loss_like_noise_pred=scale_v_pred_loss_like_noise_pred,
+        scale_weight_norms=scale_weight_norms,
+        seed=seed,
+        shuffle_caption=shuffle_caption,
+        stop_text_encoder_training=stop_text_encoder_training,
+        text_encoder_lr=text_encoder_lr,
+        train_batch_size=train_batch_size,
+        train_data_dir=train_data_dir,
+        training_comment=training_comment,
+        unet_lr=unet_lr,
+        use_wandb=use_wandb,
+        v2=v2,
+        v_parameterization=v_parameterization,
+        v_pred_like_loss=v_pred_like_loss,
+        vae=vae,
+        vae_batch_size=vae_batch_size,
+        wandb_api_key=wandb_api_key,
+        weighted_captions=weighted_captions,
+        xformers=xformers,
     )
 
-    # 学習ステップ数を計算する
-    if args.max_train_epochs is not None:
-        args.max_train_steps = args.max_train_epochs * math.ceil(
-            len(train_dataloader) / accelerator.num_processes / args.gradient_accumulation_steps
+    run_cmd += run_cmd_sample(
+        sample_every_n_steps,
+        sample_every_n_epochs,
+        sample_sampler,
+        sample_prompts,
+        output_dir,
+    )
+
+    if print_only_bool:
+        log.warning(
+            "Here is the trainer command as a reference. It will not be executed:\n"
         )
-        accelerator.print(f"override steps. steps for {args.max_train_epochs} epochs is / 指定エポックまでのステップ数: {args.max_train_steps}")
-
-    # データセット側にも学習ステップを送信
-    train_dataset_group.set_max_train_steps(args.max_train_steps)
-
-    # lr schedulerを用意する
-    lr_scheduler = train_util.get_scheduler_fix(args, optimizer, accelerator.num_processes)
-
-    # 実験的機能：勾配も含めたfp16学習を行う　モデル全体をfp16にする
-    if args.full_fp16:
-        assert (
-            args.mixed_precision == "fp16"
-        ), "full_fp16 requires mixed precision='fp16' / full_fp16を使う場合はmixed_precision='fp16'を指定してください。"
-        accelerator.print("enable full fp16 training.")
-        unet.to(weight_dtype)
-        text_encoder.to(weight_dtype)
-
-    # acceleratorがなんかよろしくやってくれるらしい
-    if args.train_text_encoder:
-        unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            unet, text_encoder, optimizer, train_dataloader, lr_scheduler
-        )
+        print(run_cmd)
     else:
-        unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(unet, optimizer, train_dataloader, lr_scheduler)
+       
 
-    # 実験的機能：勾配も含めたfp16学習を行う　PyTorchにパッチを当ててfp16でのgrad scaleを有効にする
-    if args.full_fp16:
-        train_util.patch_accelerator_for_fp16_training(accelerator)
+        log.info(run_cmd)
+        # Run the command
+        executor.execute_command(run_cmd=run_cmd)
 
-    # resumeする
-    train_util.resume_from_local_or_hf_if_specified(accelerator, args)
+        # # check if output_dir/last is a folder... therefore it is a diffuser model
+        # last_dir = pathlib.Path(f'{output_dir}/{output_name}')
 
-    # epoch数を計算する
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
-    if (args.save_n_epoch_ratio is not None) and (args.save_n_epoch_ratio > 0):
-        args.save_every_n_epochs = math.floor(num_train_epochs / args.save_n_epoch_ratio) or 1
+        # if not last_dir.is_dir():
+        #     # Copy inference model for v2 if required
+        #     save_inference_file(
+        #         output_dir, v2, v_parameterization, output_name
+        #     )
+# define a list of substrings to search for v2 base models
 
-    # 学習する
-    total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-    accelerator.print("running training / 学習開始")
-    accelerator.print(f"  num examples / サンプル数: {train_dataset_group.num_train_images}")
-    accelerator.print(f"  num batches per epoch / 1epochのバッチ数: {len(train_dataloader)}")
-    accelerator.print(f"  num epochs / epoch数: {num_train_epochs}")
-    accelerator.print(f"  batch size per device / バッチサイズ: {args.train_batch_size}")
-    accelerator.print(
-        f"  total train batch size (with parallel & distributed & accumulation) / 総バッチサイズ（並列学習、勾配合計含む）: {total_batch_size}"
-    )
-    accelerator.print(f"  gradient accumulation steps / 勾配を合計するステップ数 = {args.gradient_accumulation_steps}")
-    accelerator.print(f"  total optimization steps / 学習ステップ数: {args.max_train_steps}")
+def update_my_data(my_data):
+    # Update the optimizer based on the use_8bit_adam flag
+    use_8bit_adam = my_data.get("use_8bit_adam", False)
+    my_data.setdefault("optimizer", "AdamW8bit" if use_8bit_adam else "AdamW")
 
-    progress_bar = tqdm(range(args.max_train_steps), smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")
-    global_step = 0
+    # Update model_list to custom if empty or pretrained_model_name_or_path is not a preset model
+    model_list = my_data.get("model_list", [])
+    pretrained_model_name_or_path = my_data.get("pretrained_model_name_or_path", "")
+    if not model_list or pretrained_model_name_or_path not in ALL_PRESET_MODELS:
+        my_data["model_list"] = "custom"
 
-    noise_scheduler = DDPMScheduler(
-        beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000, clip_sample=False
-    )
-    prepare_scheduler_for_custom_training(noise_scheduler, accelerator.device)
-    if args.zero_terminal_snr:
-        custom_train_functions.fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler)
+    # Convert values to int if they are strings
+    for key in ["epoch", "save_every_n_epochs", "lr_warmup"]:
+        value = my_data.get(key, 0)
+        if isinstance(value, str) and value.strip().isdigit():
+            my_data[key] = int(value)
+        elif not value:
+            my_data[key] = 0
 
-    if accelerator.is_main_process:
-        init_kwargs = {}
-        if args.wandb_run_name:
-            init_kwargs['wandb'] = {'name': args.wandb_run_name}
-        if args.log_tracker_config is not None:
-            init_kwargs = toml.load(args.log_tracker_config)
-        accelerator.init_trackers("finetuning" if args.log_tracker_name is None else args.log_tracker_name, init_kwargs=init_kwargs)
+    # Convert values to float if they are strings
+    for key in ["noise_offset", "learning_rate", "text_encoder_lr", "unet_lr"]:
+        value = my_data.get(key, 0)
+        if isinstance(value, str) and value.strip().isdigit():
+            my_data[key] = float(value)
+        elif not value:
+            my_data[key] = 0
 
-    # For --sample_at_first
-    train_util.sample_images(accelerator, args, 0, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
+    # Update LoRA_type if it is set to LoCon
+    if my_data.get("LoRA_type", "Standard") == "LoCon":
+        my_data["LoRA_type"] = "LyCORIS/LoCon"
 
-    loss_recorder = train_util.LossRecorder()
-    for epoch in range(num_train_epochs):
-        accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
-        current_epoch.value = epoch + 1
+    # Update model save choices due to changes for LoRA and TI training
+    if "save_model_as" in my_data:
+        if (
+            my_data.get("LoRA_type") or my_data.get("num_vectors_per_token")
+        ) and my_data.get("save_model_as") not in ["safetensors", "ckpt"]:
+            message = "Updating save_model_as to safetensors because the current value in the config file is no longer applicable to {}"
+            if my_data.get("LoRA_type"):
+                log.info(message.format("LoRA"))
+            if my_data.get("num_vectors_per_token"):
+                log.info(message.format("TI"))
+            my_data["save_model_as"] = "safetensors"
 
-        for m in training_models:
-            m.train()
+    # Update xformers if it is set to True and is a boolean
+    xformers_value = my_data.get("xformers", None)
+    if isinstance(xformers_value, bool):
+        if xformers_value:
+            my_data["xformers"] = "xformers"
+        else:
+            my_data["xformers"] = "none"
 
-        for step, batch in enumerate(train_dataloader):
-            current_step.value = global_step
-            with accelerator.accumulate(training_models[0]):  # 複数モデルに対応していない模様だがとりあえずこうしておく
-                with torch.no_grad():
-                    if "latents" in batch and batch["latents"] is not None:
-                        latents = batch["latents"].to(accelerator.device)  # .to(dtype=weight_dtype)
-                    else:
-                        # latentに変換
-                        latents = vae.encode(batch["images"].to(dtype=weight_dtype)).latent_dist.sample()
-                    latents = latents * 0.18215
-                b_size = latents.shape[0]
-
-                with torch.set_grad_enabled(args.train_text_encoder):
-                    # Get the text embedding for conditioning
-                    if args.weighted_captions:
-                        encoder_hidden_states = get_weighted_text_embeddings(
-                            tokenizer,
-                            text_encoder,
-                            batch["captions"],
-                            accelerator.device,
-                            args.max_token_length // 75 if args.max_token_length else 1,
-                            clip_skip=args.clip_skip,
-                        )
-                    else:
-                        input_ids = batch["input_ids"].to(accelerator.device)
-                        encoder_hidden_states = train_util.get_hidden_states(
-                            args, input_ids, tokenizer, text_encoder, None if not args.full_fp16 else weight_dtype
-                        )
-
-                # Sample noise, sample a random timestep for each image, and add noise to the latents,
-                # with noise offset and/or multires noise if specified
-                noise, noisy_latents, timesteps = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
-
-                # Predict the noise residual
-                with accelerator.autocast():
-                    noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
-
-                if args.v_parameterization:
-                    # v-parameterization training
-                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
-                else:
-                    target = noise
-
-                if args.min_snr_gamma or args.scale_v_pred_loss_like_noise_pred or args.debiased_estimation_loss:
-                    # do not mean over batch dimension for snr weight or scale v-pred loss
-                    loss = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="none")
-                    loss = loss.mean([1, 2, 3])
-
-                    if args.min_snr_gamma:
-                        loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
-                    if args.scale_v_pred_loss_like_noise_pred:
-                        loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
-                    if args.debiased_estimation_loss:
-                        loss = apply_debiased_estimation(loss, timesteps, noise_scheduler)
-
-                    loss = loss.mean()  # mean over batch dimension
-                else:
-                    loss = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="mean")
-
-                accelerator.backward(loss)
-                if accelerator.sync_gradients and args.max_grad_norm != 0.0:
-                    params_to_clip = []
-                    for m in training_models:
-                        params_to_clip.extend(m.parameters())
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
-
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
-
-            # Checks if the accelerator has performed an optimization step behind the scenes
-            if accelerator.sync_gradients:
-                progress_bar.update(1)
-                global_step += 1
-
-                train_util.sample_images(
-                    accelerator, args, None, global_step, accelerator.device, vae, tokenizer, text_encoder, unet
-                )
-
-                # 指定ステップごとにモデルを保存
-                if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
-                    accelerator.wait_for_everyone()
-                    if accelerator.is_main_process:
-                        src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
-                        train_util.save_sd_model_on_epoch_end_or_stepwise(
-                            args,
-                            False,
-                            accelerator,
-                            src_path,
-                            save_stable_diffusion_format,
-                            use_safetensors,
-                            save_dtype,
-                            epoch,
-                            num_train_epochs,
-                            global_step,
-                            accelerator.unwrap_model(text_encoder),
-                            accelerator.unwrap_model(unet),
-                            vae,
-                        )
-
-            current_loss = loss.detach().item()  # 平均なのでbatch sizeは関係ないはず
-            if args.logging_dir is not None:
-                logs = {"loss": current_loss}
-                train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=True)
-                accelerator.log(logs, step=global_step)
-
-            loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
-            avr_loss: float = loss_recorder.moving_average
-            logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
-            progress_bar.set_postfix(**logs)
-
-            if global_step >= args.max_train_steps:
-                break
-
-        if args.logging_dir is not None:
-            logs = {"loss/epoch": loss_recorder.moving_average}
-            accelerator.log(logs, step=epoch + 1)
-
-        accelerator.wait_for_everyone()
-
-        if args.save_every_n_epochs is not None:
-            if accelerator.is_main_process:
-                src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
-                train_util.save_sd_model_on_epoch_end_or_stepwise(
-                    args,
-                    True,
-                    accelerator,
-                    src_path,
-                    save_stable_diffusion_format,
-                    use_safetensors,
-                    save_dtype,
-                    epoch,
-                    num_train_epochs,
-                    global_step,
-                    accelerator.unwrap_model(text_encoder),
-                    accelerator.unwrap_model(unet),
-                    vae,
-                )
-
-        train_util.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
-
-    is_main_process = accelerator.is_main_process
-    if is_main_process:
-        unet = accelerator.unwrap_model(unet)
-        text_encoder = accelerator.unwrap_model(text_encoder)
-
-    accelerator.end_training()
-
-    if args.save_state and is_main_process:
-        train_util.save_state_on_train_end(args, accelerator)
-
-    del accelerator  # この後メモリを使うのでこれは消す
-
-    if is_main_process:
-        src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
-        train_util.save_sd_model_on_train_end(
-            args, src_path, save_stable_diffusion_format, use_safetensors, save_dtype, epoch, global_step, text_encoder, unet, vae
-        )
-        print("model saved.")
-
+    return my_data
 
 def setup_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
@@ -490,41 +728,6 @@ def setup_parser() -> argparse.ArgumentParser:
 
 if __name__ == "__main__":
     import json
-
-    '''
-    def caption_images(
-        train_data_dir, !
-        caption_file_ext,
-        batch_size,
-        num_beams,
-        top_p,
-        max_length,
-        min_length,
-        beam_search,
-        prefix, !
-        postfix,
-    ):
-    '''
-    '''
-    def dreambooth_folder_preparation(
-        util_training_images_dir_input, !
-        util_training_images_repeat_input, !
-        util_instance_prompt_input, !
-        util_regularization_images_dir_input, !
-        util_regularization_images_repeat_input, 
-        util_class_prompt_input, !
-        util_training_dir_output, !
-    ):
-    '''
-    '''
-    load in the received config.json file and train on it
-        make sure u set args.config_file = 'path to config file'
-        args = train_util.read_config_from_file(args, parser)
-        train(args)
-    '''
-    # just pass in config path when calling fine_tune.py remotely
-    # config path for caption_images
-    # config path for 
     parser = setup_parser()
     parser.add_argument('--remote_training_data_dir')
     parser.add_argument('--remote_instance_keyword')
@@ -579,7 +782,8 @@ if __name__ == "__main__":
     #- "update trin_data_dir" AND "reg_data_dir" AND "output_dir"
     d = json.load(open(args.config_file))
     for k,v in updated_args.items():
-        if k in d: d[k] = v
+        if k in d: 
+            d[k] = v
     # remove train config args
     d.pop('train_config', None)
     with open(args.config_file, 'w') as f:
@@ -587,4 +791,25 @@ if __name__ == "__main__":
 
     args = train_util.read_config_from_file(args, parser)
 
-    train(args)
+    #train(args)
+    # TODO it takes like 20 secs to boot up the gui, just call accelerate directly? 
+    my_data = update_my_data(d)
+
+    train_model_args = inspect.getfullargspec(train_model).args
+
+    filtered_args = {k:my_data[k] for k in train_model_args if k in my_data}
+
+    headless = {'label': 'True'}
+    print_only = {'label': 'True'}
+ 
+    train_model(headless, print_only, **filtered_args)
+    # sample cmd:
+    '''
+    accelerate launch --num_cpu_threads_per_process=2 "./sdxl_train_network.py" --bucket_no_upscale --bucket_reso_steps=64 --cache_latents --cache_latents_to_disk --enable_bucket            
+                         --min_bucket_reso=256 --max_bucket_reso=2048 --gradient_checkpointing --learning_rate="1.0" --lr_scheduler="constant" --lr_scheduler_num_cycles="5" --max_data_loader_n_workers="0"       
+                         --max_grad_norm="1" --resolution="1024,1024" --max_train_steps="5700" --mixed_precision="bf16" --network_alpha="64" --network_dim=256 --network_module=networks.lora --no_half_vae        
+                         --optimizer_type="DAdaptation" --output_dir="/workspace/kohya_ss/dataset/minjunes/minjunes_02-28-13:39" --output_name="bwell2-sdxl-dadaption"                                             
+                         --pretrained_model_name_or_path="stabilityai/stable-diffusion-xl-base-1.0" --reg_data_dir="/workspace/kohya_ss/dataset/minjunes/minjunes_02-28-13:39/reg" --save_every_n_epochs="1"       
+                         --save_model_as=safetensors --save_precision="bf16" --text_encoder_lr=1.0 --train_batch_size="1" --train_data_dir="/workspace/kohya_ss/dataset/minjunes/minjunes_02-28-13:39/img"         
+                         --unet_lr=1.0 --xformers   
+    '''

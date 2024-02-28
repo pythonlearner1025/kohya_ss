@@ -574,6 +574,8 @@ def train_model(
     check_duplicate_filenames(train_data_dir)
 
     if not os.path.exists(train_data_dir):
+        print('Image Folder does not exist')
+        print(train_data_dir)
         output_message(msg="Image folder does not exist", headless=headless_bool)
         return
 
@@ -582,6 +584,8 @@ def train_model(
 
     if reg_data_dir != "":
         if not os.path.exists(reg_data_dir):
+            print('REg folder does not exist')
+            print(reg_data_dir)
             output_message(
                 msg="Regularisation folder does not exist",
                 headless=headless_bool,
@@ -592,6 +596,7 @@ def train_model(
             return
 
     if output_dir == "":
+        print('output folder path is missing')
         output_message(msg="Output folder path is missing", headless=headless_bool)
         return
 

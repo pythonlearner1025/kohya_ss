@@ -33,6 +33,8 @@ from library.custom_train_functions import (
     apply_debiased_estimation,
 )
 
+from library.blip_caption_gui import caption_images
+from library.dreambooth_folder_creation_gui import dreambooth_folder_preparation
 
 def train(args):
     train_util.verify_training_args(args)
@@ -106,7 +108,7 @@ def train(args):
     # モデルを読み込む
     text_encoder, vae, unet, load_stable_diffusion_format = train_util.load_target_model(args, weight_dtype, accelerator)
 
-    # verify load/save model formats
+    #memore verify load/save model formats
     if load_stable_diffusion_format:
         src_stable_diffusion_ckpt = args.pretrained_model_name_or_path
         src_diffusers_model_path = None
@@ -486,11 +488,104 @@ def setup_parser() -> argparse.ArgumentParser:
 
     return parser
 
-
 if __name__ == "__main__":
-    parser = setup_parser()
+    import json
 
+    '''
+    def caption_images(
+        train_data_dir, !
+        caption_file_ext,
+        batch_size,
+        num_beams,
+        top_p,
+        max_length,
+        min_length,
+        beam_search,
+        prefix, !
+        postfix,
+    ):
+    '''
+    '''
+    def dreambooth_folder_preparation(
+        util_training_images_dir_input, !
+        util_training_images_repeat_input, !
+        util_instance_prompt_input, !
+        util_regularization_images_dir_input, !
+        util_regularization_images_repeat_input, 
+        util_class_prompt_input, !
+        util_training_dir_output, !
+    ):
+    '''
+    '''
+    load in the received config.json file and train on it
+        make sure u set args.config_file = 'path to config file'
+        args = train_util.read_config_from_file(args, parser)
+        train(args)
+    '''
+    # just pass in config path when calling fine_tune.py remotely
+    # config path for caption_images
+    # config path for 
+    parser = setup_parser()
+    parser.add_argument('--remote_config_path')
+    parser.add_argument('--remote_training_data_dir')
+    parser.add_argument('--remote_instance_keyword')
+    parser.add_argument('--remote_training_repeats')
+    parser.add_argument('--remote_class_keyword')
+    parser.add_argument('--remote_output_dir')
     args = parser.parse_args()
+
+    config_path = args.remote_config_path
+    configs = json.load(open(config_path))
+
+    # TODO get female reg
+    assert args.remote_class_keyword == 'man' or args.remote_class_keyword == 'woman'
+    default_reg_dir = f'/workspace/kohya_ss/dataset/reg/{args.remote_class_keyword}'
+
+    #BLIP ARGS
+    caption_file_ext = '.txt'
+    batch_size = 8
+    num_beams = 1
+    top_p = 0.9
+    max_length = 50
+    min_length = 10
+    beam_search = True
+    prefix = args.remote_instance_keyword
+    postfix = ''
+    
+    print('captioning...')
+    caption_images(
+        args.remote_training_data_dir,
+        caption_file_ext,
+        batch_size,
+        num_beams,
+        top_p,
+        max_length,
+        min_length,
+        beam_search,
+        prefix,
+        postfix
+    )
+
+    print('prepping dataset...')
+    updated_args = dreambooth_folder_preparation(
+        args.remote_training_data_dir,
+        args.remote_training_repeats,
+        args.remote_instance_keyword,
+        default_reg_dir,
+        1,
+        args.remote_class_keyword,
+        args.remote_output_dir
+    )
+
+    #- "update trin_data_dir" AND "reg_data_dir" AND "output_dir"
+    d = json.load(open(args.remote_config_path))
+    for k,v in updated_args.items():
+        if k in d: d[k] = v
+    # remove train config args
+    d.pop('train_config', None)
+    with open(args.remote_config_path, 'w') as f:
+        json.dump(d,f)
+
     args = train_util.read_config_from_file(args, parser)
 
     train(args)

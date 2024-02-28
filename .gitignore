@@ -11,9 +11,13 @@ wd14_tagger_model
 # CUDNN for Windows
 cudnn_windows
 
+# dataset
+/dataset/
+
 # Cache and temporary files
 .cache
 .DS_Store
+.vscode
 
 # Scripts and executables
 locon

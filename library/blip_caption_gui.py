@@ -10,7 +10,6 @@ log = setup_logging()
 
 PYTHON = 'python3' if os.name == 'posix' else './venv/Scripts/python.exe'
 
-
 def caption_images(
     train_data_dir,
     caption_file_ext,

@@ -86,14 +86,13 @@ then
         fi
     fi
 fi
-
-#Set STARTUP_CMD as normal python if not specified
-if [[ -z "$STARTUP_CMD" ]]
-then
-    STARTUP_CMD=python
+# Set STARTUP_CMD to use conda run in the "koya" environment if not specified
+if [[ -z "$STARTUP_CMD" ]]; then
+    STARTUP_CMD="conda run -n koya --no-capture-output python"
 fi
 
 # Validate the requirements and run the script if successful
 if python "$SCRIPT_DIR/setup/validate_requirements.py" -r "$REQUIREMENTS_FILE"; then
-    "${STARTUP_CMD}" $STARTUP_CMD_ARGS "$SCRIPT_DIR/kohya_gui.py" "$@"
+    eval "${STARTUP_CMD}" $STARTUP_CMD_ARGS "$SCRIPT_DIR/kohya_gui.py" "$@"
 fi
+

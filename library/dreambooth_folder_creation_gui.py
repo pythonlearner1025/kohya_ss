@@ -116,6 +116,11 @@ def dreambooth_folder_preparation(
     log.info(
         f'Done creating kohya_ss training folder structure at {util_training_dir_output}...'
     )
+    return {
+        'train_data_dir': training_dir, 
+        'reg_data_dir': regularization_dir,
+        'output_dir': util_training_dir_output
+    }
 
 
 def gradio_dreambooth_folder_creation_tab(

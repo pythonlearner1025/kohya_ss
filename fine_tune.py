@@ -727,6 +727,8 @@ def setup_parser() -> argparse.ArgumentParser:
     return parser
 
 if __name__ == "__main__":
+    # TODO
+    # takes ~1 min to load in all the imports and to get to captioning
     import json
     parser = setup_parser()
     parser.add_argument('--remote_training_data_dir')
@@ -789,9 +791,6 @@ if __name__ == "__main__":
     with open(args.config_file, 'w') as f:
         json.dump(d,f)
 
-    args = train_util.read_config_from_file(args, parser)
-
-    #train(args)
     # TODO it takes like 20 secs to boot up the gui, just call accelerate directly? 
     my_data = update_my_data(d)
 

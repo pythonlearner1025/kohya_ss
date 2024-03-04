@@ -736,6 +736,7 @@ if __name__ == "__main__":
     parser.add_argument('--remote_training_repeats')
     parser.add_argument('--remote_class_keyword')
     parser.add_argument('--remote_output_dir')
+    parser.add_argument('--remote_autocaption')
     args = parser.parse_args()
 
     config_path = args.config_file
@@ -758,18 +759,19 @@ if __name__ == "__main__":
     
     print('captioning...')
     # first we need remote_training_img dir for captioning
-    caption_images(
-        args.remote_training_data_dir,
-        caption_file_ext,
-        batch_size,
-        num_beams,
-        top_p,
-        max_length,
-        min_length,
-        beam_search,
-        prefix,
-        postfix
-    )
+    if int(args.auto_caption) != 0:
+        caption_images(
+            args.remote_training_data_dir,
+            caption_file_ext,
+            batch_size,
+            num_beams,
+            top_p,
+            max_length,
+            min_length,
+            beam_search,
+            prefix,
+            postfix
+        )
 
     print('prepping dataset...')
     # and for preparing datasets

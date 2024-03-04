@@ -759,7 +759,7 @@ if __name__ == "__main__":
     
     print('captioning...')
     # first we need remote_training_img dir for captioning
-    if int(args.auto_caption) != 0:
+    if int(args.remote_autocaption) != 0:
         caption_images(
             args.remote_training_data_dir,
             caption_file_ext,
